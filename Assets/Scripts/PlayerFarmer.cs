@@ -1,94 +1,102 @@
-// PlayerFarmer.cs
-// ─────────────────────────────────────────────────────────────────────────────
-// Attached to the PlayerArmature. Handles interaction input and
-// keeps track of which IInteractable the player is currently near.
-// Movement is handled by the Starter Assets controller — we only
-// add the farming interaction layer here.
-// ─────────────────────────────────────────────────────────────────────────────
-
 using UnityEngine;
 using TMPro;
 
 public class PlayerFarmer : MonoBehaviour
 {
-    // ── Inspector References ─────────────────────────────────────────────
-    // promptText is the single TMP_Text you created in the Canvas.
-    // There is no separate "panel" — we show/hide the text object directly.
+    [Header("UI")]
     [SerializeField] private TMP_Text promptText;
 
-    // interactionRadius controls how close the player must be to trigger a prompt.
-    // Tune this in the Inspector — 2.0 is a good starting value.
+    [Header("Interaction")]
     [SerializeField] private float interactionRadius = 2.0f;
+    [SerializeField] private float feedPickupRadius = 1.0f;
 
-    // ── Cached Components ────────────────────────────────────────────────
+    [Header("Mobile Input")]
+    [SerializeField] private bool useMobileInput = true;
+
     private Inventory inventory;
-
-    // ── State ────────────────────────────────────────────────────────────
     private IInteractable nearbyInteractable;
+    private Vector2 mobileMoveInput;
 
-    // Mobile chop hold state — read by Tree.cs each frame
-    [HideInInspector] public bool isMobileChopping = false;
+    [HideInInspector]
+    public bool isMobileChopping = false;
 
-    // ── Property ─────────────────────────────────────────────────────────
     public Inventory Inventory => inventory;
 
-    // ────────────────────────────────────────────────────────────────────
-    // Awake: cache the Inventory component on this same GameObject
-    // ────────────────────────────────────────────────────────────────────
-    void Awake()
+    private void Awake()
     {
         inventory = GetComponent<Inventory>();
+
         if (inventory == null)
-            Debug.LogError("PlayerFarmer: Inventory component missing from this GameObject!");
+        {
+            Debug.LogError("PlayerFarmer: Inventory component is missing on this GameObject.");
+        }
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Start: hide the prompt text at game start
-    // ────────────────────────────────────────────────────────────────────
-    void Start()
+    private void Start()
     {
         HidePrompt();
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Update: every frame, use Physics.OverlapSphere to find the closest
-    // interactable object within interactionRadius.
-    //
-    // Why OverlapSphere instead of OnTriggerEnter?
-    // The Starter Assets PlayerArmature uses a CharacterController, which
-    // has unreliable trigger behaviour. OverlapSphere is a direct physics
-    // query that works correctly regardless of how the player is set up.
-    // No special collider setup is needed on the player.
-    // ────────────────────────────────────────────────────────────────────
-    void Update()
+    private void Update()
     {
+        SendMovementInputToStarterAssets();
         FindNearestInteractable();
-
-        if (nearbyInteractable != null)
-        {
-            ShowPrompt(nearbyInteractable.GetPromptText());
-
-            // Keyboard: press E once to interact
-            if (Input.GetKeyDown(KeyCode.E))
-                nearbyInteractable.Interact(this);
-        }
-        else
-        {
-            HidePrompt();
-        }
-
-        // FeedBag pickup: check separately each frame
+        HandleInteractionPrompt();
         CheckFeedBagPickup();
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // FindNearestInteractable: scan all colliders within interactionRadius
-    // and set nearbyInteractable to the closest IInteractable found.
-    // ────────────────────────────────────────────────────────────────────
+    private void SendMovementInputToStarterAssets()
+    {
+        Vector2 moveInput = mobileMoveInput;
+
+        // Keyboard controls
+        if (!useMobileInput || HasKeyboardMovementInput())
+        {
+            moveInput = new Vector2(
+                Input.GetAxisRaw("Horizontal"),
+                Input.GetAxisRaw("Vertical")
+            );
+        }
+
+        if (moveInput.sqrMagnitude > 1f)
+        {
+            moveInput.Normalize();
+        }
+
+        SendMessage("MoveInput", moveInput, SendMessageOptions.DontRequireReceiver);
+    }
+
+    private bool HasKeyboardMovementInput()
+    {
+        return Input.GetKey(KeyCode.W)
+            || Input.GetKey(KeyCode.A)
+            || Input.GetKey(KeyCode.S)
+            || Input.GetKey(KeyCode.D)
+            || Input.GetKey(KeyCode.UpArrow)
+            || Input.GetKey(KeyCode.DownArrow)
+            || Input.GetKey(KeyCode.LeftArrow)
+            || Input.GetKey(KeyCode.RightArrow);
+    }
+
+    private void HandleInteractionPrompt()
+    {
+        if (nearbyInteractable == null)
+        {
+            HidePrompt();
+            return;
+        }
+
+        ShowPrompt(nearbyInteractable.GetPromptText());
+
+        // Desktop interaction key
+        if (Input.GetKeyDown(KeyCode.E))
+        {
+            InteractWithNearbyObject();
+        }
+    }
+
     private void FindNearestInteractable()
     {
-        // QueryTriggerInteraction.Collide means we detect both trigger
-        // and non-trigger colliders — works with any Asset Store prefab
         Collider[] nearby = Physics.OverlapSphere(
             transform.position,
             interactionRadius,
@@ -96,62 +104,108 @@ public class PlayerFarmer : MonoBehaviour
             QueryTriggerInteraction.Collide
         );
 
-        IInteractable closest  = null;
-        float         closestD = float.MaxValue;
+        IInteractable closest = null;
+        float closestDistance = float.MaxValue;
 
         foreach (Collider col in nearby)
         {
-            // Skip the player's own colliders
-            if (col.transform.root == transform.root) continue;
+            if (col.transform.root == transform.root)
+            {
+                continue;
+            }
 
             IInteractable interactable = col.GetComponentInParent<IInteractable>();
-            if (interactable == null) continue;
 
-            float dist = Vector3.Distance(transform.position, col.transform.position);
-            if (dist < closestD)
+            if (interactable == null)
             {
-                closestD = dist;
-                closest  = interactable;
+                continue;
+            }
+
+            float distance = Vector3.Distance(transform.position, col.transform.position);
+
+            if (distance < closestDistance)
+            {
+                closestDistance = distance;
+                closest = interactable;
             }
         }
 
         nearbyInteractable = closest;
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // CheckFeedBagPickup: auto-collect any FeedBag the player walks over
-    // ────────────────────────────────────────────────────────────────────
     private void CheckFeedBagPickup()
     {
-        Collider[] nearby = Physics.OverlapSphere(transform.position, 1.0f);
+        if (inventory == null)
+        {
+            return;
+        }
+
+        Collider[] nearby = Physics.OverlapSphere(
+            transform.position,
+            feedPickupRadius
+        );
+
         foreach (Collider col in nearby)
         {
-            if (col.CompareTag("FeedBag"))
+            if (!col.CompareTag("FeedBag"))
             {
-                inventory.AddFeedBag();
-                Destroy(col.gameObject);
+                continue;
             }
+
+            inventory.AddFeedBag();
+            Destroy(col.gameObject);
         }
     }
 
-    // ────────────────────────────────────────────────────────────────────
-    // Mobile button methods — called by on-screen UI buttons
-    // ────────────────────────────────────────────────────────────────────
-    public void MobileInteract()
+    private void InteractWithNearbyObject()
     {
         if (nearbyInteractable != null)
+        {
             nearbyInteractable.Interact(this);
+        }
     }
 
-    public void MobileChopBegin() { isMobileChopping = true;  }
-    public void MobileChopEnd()   { isMobileChopping = false; }
+    // ===== MOBILE INPUT =====
 
-    // ────────────────────────────────────────────────────────────────────
-    // Prompt helpers
-    // ────────────────────────────────────────────────────────────────────
+    public void MobileMove(Vector2 input)
+    {
+        mobileMoveInput = input;
+    }
+
+    public void MobileMoveStop()
+    {
+        mobileMoveInput = Vector2.zero;
+    }
+
+    public void MobileInteract()
+    {
+        InteractWithNearbyObject();
+    }
+
+    public void MobileChop(bool pressed)
+    {
+        isMobileChopping = pressed;
+    }
+
+    public void MobileChopBegin()
+    {
+        isMobileChopping = true;
+    }
+
+    public void MobileChopEnd()
+    {
+        isMobileChopping = false;
+    }
+
+    // ===== UI =====
+
     private void ShowPrompt(string message)
     {
-        if (promptText == null) return;
+        if (promptText == null)
+        {
+            return;
+        }
+
         promptText.gameObject.SetActive(true);
         promptText.text = message;
     }
@@ -159,13 +213,25 @@ public class PlayerFarmer : MonoBehaviour
     private void HidePrompt()
     {
         if (promptText != null)
+        {
             promptText.gameObject.SetActive(false);
+        }
     }
 
-    // Called by Tree.cs before it destroys itself
     public void ClearNearbyInteractable()
     {
         nearbyInteractable = null;
         HidePrompt();
+    }
+
+    // ===== DEBUG =====
+
+    private void OnDrawGizmosSelected()
+    {
+        Gizmos.color = Color.yellow;
+        Gizmos.DrawWireSphere(transform.position, interactionRadius);
+
+        Gizmos.color = Color.green;
+        Gizmos.DrawWireSphere(transform.position, feedPickupRadius);
     }
 }
